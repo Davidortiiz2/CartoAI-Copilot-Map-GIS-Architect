@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="globeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284C7"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="layerGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0284C7"/>
+    </linearGradient>
+    <linearGradient id="aiSpark" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FBBF24"/>
+      <stop offset="100%" stop-color="#F59E0B"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Base redonda moderna -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#0F172A"/>
+
+  <!-- Globo terráqueo y meridianos estilizados -->
+  <circle cx="32" cy="30" r="20" fill="none" stroke="#1E293B" stroke-width="2"/>
+  <ellipse cx="32" cy="30" rx="10" ry="20" fill="none" stroke="#1E293B" stroke-width="1.5"/>
+  <line x1="12" y1="30" x2="52" y2="30" stroke="#1E293B" stroke-width="1.5"/>
+
+  <!-- Capas Cartográficas Isométricas flotantes -->
+  <path d="M14 26 L32 17 L50 26 L32 35 Z" fill="url(#layerGrad)" opacity="0.85" stroke="#FFFFFF" stroke-width="0.8"/>
+  <path d="M14 36 L32 27 L50 36 L32 45 Z" fill="#22C55E" opacity="0.85" stroke="#FFFFFF" stroke-width="0.8"/>
+
+  <!-- Pin de Localización / Nodo -->
+  <circle cx="32" cy="24" r="3.5" fill="#FFFFFF"/>
+  <circle cx="32" cy="24" r="2" fill="#E11D48"/>
+
+  <!-- Brillo / Estrella de Inteligencia Artificial (Map Architect) -->
+  <g transform="translate(42, 38) scale(0.9)">
+    <circle cx="12" cy="12" r="11" fill="#0F172A" stroke="#FBBF24" stroke-width="1.5"/>
+    <path d="M12 3 C12 7.5 13.5 10.5 18 12 C13.5 13.5 12 16.5 12 21 C12 16.5 10.5 13.5 6 12 C10.5 10.5 12 7.5 12 3 Z" fill="url(#aiSpark)"/>
+  </g>
+</svg>

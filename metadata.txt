@@ -1,0 +1,17 @@
+[general]
+name=CartoAI Copilot: Map & GIS Architect
+qgisMinimumVersion=3.28
+qgisMaximumVersion=4.99
+description=Copiloto inteligente de PyQGIS para análisis geoespacial, geoprocesamiento avanzado (Processing) y diseño automático de composiciones cartográficas profesionales (Layouts) en lenguaje natural.
+about=Panel inteligente (QDockWidget) con IA en lenguaje natural. Interpreta cualquier capa cargada en el proyecto a nivel mundial, diseña composiciones de impresión completas (con mapa, leyenda, escala gráfica, norte y título), aplica simbologías avanzadas (categorizadas, graduadas y etiquetas con halo), ejecuta herramientas de geoprocesamiento nativas (buffers, clips, disolver, centroides) y analiza estadísticas de atributos mediante QgsTask en segundo plano. Desarrollado por David Ortiz, estudiante de Geografía.
+version=2.0.0
+author=David Ortiz (Estudiante de Geografía)
+email=davidortiz.geo@gmail.com
+repository=https://github.com/Davidortiiz2/CartoAI-Copilot-Map-GIS-Architect
+tracker=https://github.com/Davidortiiz2/CartoAI-Copilot-Map-GIS-Architect/issues
+tags=ai,cartography,copilot,layout,map maker,processing,symbology,assistant,geoprocessing,analysis
+category=Plugins
+icon=icon.svg
+experimental=False
+deprecated=False
+changelog=2.0.0: Versión oficial de lanzamiento por David Ortiz. Rediseño completo hacia Copiloto Cartográfico Global. Generación avanzada de composiciones cartográficas (layouts con leyenda, escala y norte), geoprocesamiento nativo con Processing (buffers, clips, centroides), simbología temática (graduados, categorizados, etiquetas), análisis de atributos y respuesta ultra-rápida.

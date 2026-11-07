@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/plugins/ai_colombia_carto_agent">
+        <file>icon.svg</file>
+    </qresource>
+</RCC>
+
