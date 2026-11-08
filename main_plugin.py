@@ -4,24 +4,23 @@ Clase principal y ciclo de vida de CartoAI Copilot: Map & GIS Architect.
 
 Controla la integración con la interfaz de QGIS, el menú de complementos,
 la barra de herramientas y la gestión del panel acoplable QDockWidget.
-Compatible con QGIS 3 y QGIS 4.
 """
 
 import os
 
+from qgis.PyQt.QtCore import Qt, QCoreApplication
+from qgis.PyQt.QtGui import QIcon
+
 try:
-    from qgis.PyQt.QtCore import Qt, QCoreApplication
-    from qgis.PyQt.QtGui import QIcon, QAction
-    from qgis.PyQt.QtWidgets import QAction as QWidgetAction
+    from qgis.PyQt.QtGui import QAction
 except ImportError:
-    from PyQt5.QtCore import Qt, QCoreApplication
-    from PyQt5.QtGui import QIcon
-    from PyQt5.QtWidgets import QAction
+    from qgis.PyQt.QtWidgets import QAction
 
 from qgis.core import QgsApplication
 from qgis.gui import QgisInterface
 
 from .agent_dockwidget import CartoAgentDockWidget
+
 
 class ColombiaCartoAgentPlugin:
     """Clase principal del plugin CartoAI Copilot."""
@@ -44,12 +43,7 @@ class ColombiaCartoAgentPlugin:
         else:
             icon = QIcon(icon_path)
 
-        try:
-            from qgis.PyQt.QtGui import QAction as MainAction
-        except ImportError:
-            from qgis.PyQt.QtWidgets import QAction as MainAction
-
-        self.action = MainAction(icon, self.tr("CartoAI Copilot: Map & GIS Architect"), self.iface.mainWindow())
+        self.action = QAction(icon, self.tr("CartoAI Copilot: Map & GIS Architect"), self.iface.mainWindow())
         self.action.setObjectName("actionCartoAICopilot")
         self.action.setToolTip(self.tr("Abrir panel de CartoAI Copilot para diseño cartográfico y geoprocesamiento"))
         self.action.triggered.connect(self.toggle_dockwidget)
@@ -58,8 +52,7 @@ class ColombiaCartoAgentPlugin:
         self.iface.addToolBarIcon(self.action)
 
         self.dockwidget = CartoAgentDockWidget(self.iface.mainWindow())
-        dock_area = getattr(Qt.DockWidgetArea, "RightDockWidgetArea", None) or getattr(Qt, "RightDockWidgetArea")
-        self.iface.addDockWidget(dock_area, self.dockwidget)
+        self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dockwidget)
         self.dockwidget.hide()
 
         self.dockwidget.visibilityChanged.connect(self._on_dock_visibility_changed)

@@ -1,6 +1,6 @@
 # CartoAI Copilot: Map & GIS Architect (QGIS 3 & QGIS 4)
 
-Copiloto inteligente de Inteligencia Artificial integrado en QGIS para **análisis geoespacial avanzado, ejecución de geoprocesamientos y generación automatizada de composiciones cartográficas profesionales (Layouts)** a nivel mundial.
+Copiloto inteligente de Inteligencia Artificial integrado en QGIS para **análisis geoespacial avanzado, ejecución de geoprocesamientos y generación automatizada de composiciones cartográficas profesionales (Layouts)** a nivel mundial, con arquitectura inspirada en TerraLab.
 
 Desarrollado y mantenido por **David Ortiz** (*Estudiante de Geografía*).
 
@@ -8,14 +8,15 @@ Desarrollado y mantenido por **David Ortiz** (*Estudiante de Geografía*).
 
 ## 🚀 Capacidades Principales
 
-1. **Interpretación y Análisis Geoespacial Global:**
-   - Inspecciona y comprende en tiempo real las capas cargadas en tu proyecto (Shapefiles, GeoPackages, GeoJSON, PostGIS, Ráster).
-   - Analiza tipos de geometría, sistemas de referencia de coordenadas (CRS), esquemas de campos y valores de muestra.
+1. **Arquitectura Reactiva y Ejecutor PyQGIS en Tiempo Real:**
+   - Detección en vivo de la capa activa (`LayerWatch`) mostrando geometría, número de entidades y CRS.
+   - Generación y ejecución de scripts PyQGIS en el hilo principal con captura de salidas estándar (`stdout`) y errores.
+   - Detección automática y zoom a capas recién creadas.
 
 2. **Diseño Cartográfico y Simbología Temática:**
    - **Auto-Estilo Armonizado:** Paletas de colores cromáticamente balanceadas y adaptativas según la geometría.
    - **Clasificación Categorizada:** Genera mapas temáticos cualitativos con rampas cromáticas como *Spectral, Viridis, Plasma o Set1*.
-   - **Etiquetado Cartográfico Inteligente:** Activa etiquetas con halo protector (buffer blanco) para asegurar lectura clara sobre cualquier fondo.
+   - **Etiquetado Cartográfico Inteligente:** Activa etiquetas con halo protector (buffer blanco) para lectura clara sobre cualquier fondo.
 
 3. **Generador Automático de Composiciones de Impresión (Layouts):**
    - Diseña mapas listos para PDF/impresión en formato A4 (horizontal o vertical).
@@ -25,7 +26,7 @@ Desarrollado y mantenido por **David Ortiz** (*Estudiante de Geografía*).
      - Leyenda dinámica.
      - Barra de escala gráfica con subdivisiones métricas/kilométricas.
      - Flecha de orientación al norte.
-     - Cajetín de metadatos (Autor: `David Ortiz`, CRS y fecha de generación).
+     - Cajetín de metadatos (Autor: `David Ortiz`, CRS y fecha).
 
 4. **Geoprocesamiento Espacial Nativo:**
    - Ejecución autónoma de herramientas de análisis mediante la API de Processing:
@@ -34,42 +35,22 @@ Desarrollado y mantenido por **David Ortiz** (*Estudiante de Geografía*).
      - Cálculo de centroides geométricos (*Centroids*).
      - Disolución de límites y fronteras (*Dissolve*).
 
-5. **Panel Interactivo con Atajos Rápidos:**
-   - Chips interactivos de 1 clic:
-     - 🗺️ *Crear Layout*
-     - 🎨 *Auto-Estilo*
-     - ⭕ *Buffer 100m*
-     - 🏷️ *Etiquetar*
-     - 📊 *Analizar*
-   - Chat conversacional con soporte de Google Gemini (`gemini-3.5-flash-lite`, respuesta en ~2s) y OpenAI (`gpt-4o-mini`).
+5. **Panel Interactivo con Atajos Rápidos (Chips estilo TerraLab):**
+   - 🗺️ *Layout A4*
+   - 🎨 *Auto-Estilo*
+   - ⭕ *Buffer 100m*
+   - 🏷️ *Etiquetar*
+   - 🌍 *Cargar OSM*
+   - 📊 *Analizar Capa*
+   - Asistente multimodal con soporte para Google Gemini (`gemini-2.0-flash`), OpenAI (`gpt-4o-mini`) y endpoints locales/personalizados (DeepSeek, Groq, Ollama).
+   - Motor local de respaldo: si la nube está ocupada (503/429) o no hay conexión, resuelve comandos cartográficos comunes instantáneamente.
 
 ---
 
-## 🛠️ Instalación y Activación
+## 🛠️ Instalación y Uso en QGIS
 
-El plugin ya se encuentra sincronizado en tu perfil de QGIS:
-`%APPDATA%\QGIS\QGIS4\profiles\default\python\plugins\ai_colombia_carto_agent`
-
-1. Abre QGIS.
-2. Ve al menú: **Complementos ➔ Administrar e instalar complementos...**
-3. En la pestaña **Instalados**, activa la casilla:
-   ☑️ **CartoAI Copilot: Map & GIS Architect**
-4. Pulsa el ícono en la barra de herramientas para desplegar el panel.
-
----
-
-## 💡 Ejemplos de Peticiones
-
-* *"Diseña una composición cartográfica horizontal en A4 para imprimir con título 'Mapa de Uso del Suelo', leyenda y escala gráfica."*
-* *"Aplica una simbología categorizada con colores Spectral a la capa de municipios según el campo 'tipo'."*
-* *"Crea un área de influencia (buffer) de 500 metros alrededor de la capa de vías."*
-* *"Activa etiquetas en la capa de ciudades usando el campo 'nombre' con halo blanco."*
-* *"¿Qué capas tengo abiertas en el proyecto y qué campos contienen?"*
-
----
-
-## 📄 Licencia y Créditos
-* **Autor:** David Ortiz (Estudiante de Geografía)
-* **Repositorio oficial:** [https://github.com/Davidortiiz2/CartoAI-Copilot-Map-GIS-Architect](https://github.com/Davidortiiz2/CartoAI-Copilot-Map-GIS-Architect)
-* **Seguimiento de problemas (Issues):** [https://github.com/Davidortiiz2/CartoAI-Copilot-Map-GIS-Architect/issues](https://github.com/Davidortiiz2/CartoAI-Copilot-Map-GIS-Architect/issues)
-* **Licencia:** GNU General Public License v2.0+ (GPL-2.0+)
+1. Abre QGIS (3.28 a 4.99).
+2. Ve al menú **Complementos** > **Administrar e instalar complementos...**
+3. En la pestaña *Instalados*, activa la casilla **CartoAI Copilot: Map & GIS Architect**.
+4. Haz clic en el icono del mapa con destello en la barra de herramientas o accede desde el menú **CartoAI Copilot**.
+5. Opcional: Haz clic en el icono de engranaje (⚙️) para ingresar tu clave gratuita de Google Gemini (o OpenAI / DeepSeek).

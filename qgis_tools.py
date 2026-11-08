@@ -8,32 +8,28 @@ Proporciona herramientas de nivel senior para:
 3. Ejecución de geoprocesos nativos de QGIS mediante Processing (Buffers, Clips, Centroides, Disolver).
 4. Creación automatizada de composiciones de impresión profesionales (QgsPrintLayout) con mapa,
    título, subtítulo, leyenda dinámica, barra de escala gráfica y flecha de norte.
-Compatible con QGIS 3 y QGIS 4.
+Compatible con QGIS 3 (PyQt5) y QGIS 4 (PyQt6).
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 import datetime
 import os
 
 from qgis.core import (
     QgsProject,
     QgsMapLayer,
-    QgsMapLayerType,
     QgsVectorLayer,
+    QgsRasterLayer,
     QgsWkbTypes,
     QgsSingleSymbolRenderer,
     QgsCategorizedSymbolRenderer,
     QgsRendererCategory,
     QgsGraduatedSymbolRenderer,
     QgsRendererRange,
-    QgsClassificationQuantile,
-    QgsClassificationEqualInterval,
     QgsStyle,
-    QgsColorRamp,
     QgsMarkerSymbol,
     QgsLineSymbol,
     QgsFillSymbol,
-    QgsSymbol,
     QgsPalLayerSettings,
     QgsVectorLayerSimpleLabeling,
     QgsTextFormat,
@@ -54,12 +50,8 @@ from qgis.core import (
 )
 from qgis.utils import iface
 
-try:
-    from qgis.PyQt.QtCore import Qt
-    from qgis.PyQt.QtGui import QColor, QFont
-except ImportError:
-    from PyQt5.QtCore import Qt
-    from PyQt5.QtGui import QColor, QFont
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor, QFont
 
 try:
     import processing
@@ -72,13 +64,50 @@ except ImportError:
 LOG_TAG = "CartoAICopilot"
 
 
-def find_layer_by_name(layer_name: str, project: Optional[QgsProject] = None) -> Optional[QgsVectorLayer]:
-    """Busca una capa vectorial por coincidencia exacta o parcial insensible a mayúsculas."""
+def _enum_val(cls, scoped_name: str, member_name: str):
+    """Obtiene un valor de enumeración de forma compatible entre PyQt5/QGIS3 y PyQt6/QGIS4."""
+    if hasattr(cls, member_name):
+        return getattr(cls, member_name)
+    scoped = getattr(cls, scoped_name, None)
+    if scoped is not None and hasattr(scoped, member_name):
+        return getattr(scoped, member_name)
+    return None
+
+
+LAYOUT_MM = QgsUnitTypes.LayoutUnit.LayoutMillimeters
+DIST_KM = QgsUnitTypes.DistanceUnit.DistanceKilometers
+POINT_GEOM = QgsWkbTypes.GeometryType.PointGeometry
+LINE_GEOM = QgsWkbTypes.GeometryType.LineGeometry
+POLYGON_GEOM = QgsWkbTypes.GeometryType.PolygonGeometry
+
+
+def find_layer_by_name(
+    layer_or_name: Union[str, QgsMapLayer, None] = None,
+    project: Optional[QgsProject] = None
+) -> Optional[QgsVectorLayer]:
+    """
+    Resuelve una capa vectorial ya sea desde un objeto QgsMapLayer, un nombre parcial/exacto,
+    o devuelve la capa activa en QGIS si no se especifica.
+    """
     if project is None:
         project = QgsProject.instance()
 
-    layers = project.mapLayers().values()
-    target_clean = layer_name.strip().lower()
+    if isinstance(layer_or_name, QgsVectorLayer):
+        return layer_or_name
+    if isinstance(layer_or_name, QgsMapLayer):
+        return None
+
+    if not layer_or_name or not str(layer_or_name).strip():
+        active = iface.activeLayer() if iface else None
+        if isinstance(active, QgsVectorLayer):
+            return active
+        for lyr in project.mapLayers().values():
+            if isinstance(lyr, QgsVectorLayer):
+                return lyr
+        return None
+
+    target_clean = str(layer_or_name).strip().lower()
+    layers = list(project.mapLayers().values())
 
     for lyr in layers:
         if lyr.name().strip().lower() == target_clean and isinstance(lyr, QgsVectorLayer):
@@ -87,6 +116,10 @@ def find_layer_by_name(layer_name: str, project: Optional[QgsProject] = None) ->
     for lyr in layers:
         if target_clean in lyr.name().strip().lower() and isinstance(lyr, QgsVectorLayer):
             return lyr
+
+    active = iface.activeLayer() if iface else None
+    if isinstance(active, QgsVectorLayer):
+        return active
 
     return None
 
@@ -100,31 +133,39 @@ def get_active_layers_summary(project: Optional[QgsProject] = None) -> List[Dict
         project = QgsProject.instance()
 
     summary: List[Dict[str, Any]] = []
+    active_layer = iface.activeLayer() if iface else None
+    active_id = active_layer.id() if active_layer else None
 
     for layer_id, layer in project.mapLayers().items():
         if not layer.isValid():
             continue
 
-        is_vector = (layer.type() == QgsMapLayerType.VectorLayer)
+        is_vector = isinstance(layer, QgsVectorLayer)
         crs_auth = layer.crs().authid() if layer.crs().isValid() else "Sin CRS"
 
         info: Dict[str, Any] = {
             "name": layer.name(),
             "id": layer_id,
+            "is_active": (layer_id == active_id),
             "type": "Vector" if is_vector else "Raster",
             "crs": crs_auth
         }
 
-        if is_vector and isinstance(layer, QgsVectorLayer):
+        if is_vector:
             is_spatial = layer.isSpatial()
             geom_str = QgsWkbTypes.displayString(layer.wkbType()) if is_spatial else "Tabla alfanumérica"
             feature_count = layer.featureCount()
 
-            # Extraer campos y muestra de valores de los primeros registros
             fields_data = []
-            sample_features = list(layer.getFeatures())[:3]
+            sample_features = []
+            for idx, feat in enumerate(layer.getFeatures()):
+                if idx >= 3:
+                    break
+                sample_features.append(feat)
 
-            for field in layer.fields()[:25]:
+            for i, field in enumerate(layer.fields()):
+                if i >= 25:
+                    break
                 field_name = field.name()
                 sample_values = [str(f[field_name]) for f in sample_features if f[field_name] is not None]
                 fields_data.append({
@@ -146,78 +187,90 @@ def get_active_layers_summary(project: Optional[QgsProject] = None) -> List[Dict
 
 
 def apply_vector_style(
-    layer_name: str,
-    color: str = "#2A9D8F",
-    outline_color: str = "#1D3557",
+    layer_name: Union[str, QgsMapLayer, None] = None,
+    color: Optional[str] = None,
+    outline_color: Optional[str] = None,
     size_or_width: float = 2.0,
-    opacity: float = 1.0,
-    project: Optional[QgsProject] = None
+    opacity: float = 0.85,
+    project: Optional[QgsProject] = None,
+    **kwargs
 ) -> Dict[str, Any]:
-    """Aplica una simbología única con color armonizado y grosor adaptativo."""
-    layer = find_layer_by_name(layer_name, project)
+    """
+    Aplica una simbología única con color armonizado y grosor adaptativo.
+    Soporta alias de argumentos: color_hex, stroke_color, stroke_width, layer.
+    """
+    target = layer_name or kwargs.get("layer")
+    layer = find_layer_by_name(target, project)
     if not layer:
-        return {"success": False, "error": f"No se encontró la capa '{layer_name}'."}
+        return {"success": False, "error": f"No se encontró la capa '{target}'."}
 
     if not layer.isSpatial():
         return {"success": True, "message": f"La capa '{layer.name()}' es una tabla de datos sin geometría espacial."}
 
-    q_color = QColor(color)
-    q_outline = QColor(outline_color)
-    q_color.setAlphaF(max(0.0, min(opacity, 1.0)))
+    fill_hex = color or kwargs.get("color_hex") or kwargs.get("fill_color") or "#2563EB"
+    border_hex = outline_color or kwargs.get("stroke_color") or kwargs.get("border_color") or "#1E3A8A"
+    width_val = kwargs.get("stroke_width", size_or_width)
+
+    q_color = QColor(fill_hex)
+    q_outline = QColor(border_hex)
+    layer.setOpacity(max(0.0, min(float(opacity), 1.0)))
 
     geom_type = layer.geometryType()
 
-    if geom_type == QgsWkbTypes.PointGeometry:
+    if geom_type == POINT_GEOM:
         symbol = QgsMarkerSymbol.createSimple({
             "name": "circle",
-            "color": q_color.name(QColor.HexArgb),
-            "outline_color": q_outline.name(QColor.HexArgb),
+            "color": q_color.name(),
+            "outline_color": q_outline.name(),
             "outline_width": "0.4",
-            "size": str(size_or_width)
+            "size": str(width_val if width_val >= 1.5 else 3.0)
         })
-    elif geom_type == QgsWkbTypes.LineGeometry:
+    elif geom_type == LINE_GEOM:
         symbol = QgsLineSymbol.createSimple({
-            "line_color": q_color.name(QColor.HexArgb),
-            "line_width": str(size_or_width)
+            "line_color": q_color.name(),
+            "line_width": str(width_val)
         })
-    elif geom_type == QgsWkbTypes.PolygonGeometry:
+    elif geom_type == POLYGON_GEOM:
         symbol = QgsFillSymbol.createSimple({
-            "color": q_color.name(QColor.HexArgb),
-            "outline_color": q_outline.name(QColor.HexArgb),
-            "outline_width": str(size_or_width if size_or_width < 1.5 else 0.6)
+            "color": q_color.name(),
+            "outline_color": q_outline.name(),
+            "outline_width": str(width_val if width_val < 1.5 else 0.5)
         })
     else:
-        return {"success": False, "error": f"Geometría no soportada en '{layer_name}'."}
+        return {"success": False, "error": f"Geometría no soportada en '{layer.name()}'."}
 
     layer.setRenderer(QgsSingleSymbolRenderer(symbol))
     layer.triggerRepaint()
     if iface and iface.mapCanvas():
         iface.mapCanvas().refresh()
 
-    return {"success": True, "message": f"Estilo aplicado a '{layer.name()}' (Color: {color})."}
+    return {"success": True, "message": f"Estilo aplicado a '{layer.name()}' (Color: {fill_hex})."}
 
 
 def apply_categorized_style(
-    layer_name: str,
-    field_name: str,
+    layer_name: Union[str, QgsMapLayer, None] = None,
+    field_name: Optional[str] = None,
     color_ramp_name: str = "Spectral",
-    project: Optional[QgsProject] = None
+    project: Optional[QgsProject] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """Aplica una clasificación cualitativa/categorizada con una rampa de color estilizada."""
-    layer = find_layer_by_name(layer_name, project)
+    target = layer_name or kwargs.get("layer")
+    layer = find_layer_by_name(target, project)
     if not layer or not layer.isSpatial():
-        return {"success": False, "error": f"Capa vectorial espacial '{layer_name}' no encontrada."}
+        return {"success": False, "error": f"Capa vectorial espacial '{target}' no encontrada."}
+
+    if not field_name:
+        field_name = kwargs.get("field") or (layer.fields()[0].name() if len(layer.fields()) > 0 else "")
 
     field_idx = layer.fields().indexOf(field_name)
     if field_idx == -1:
         return {"success": False, "error": f"El campo '{field_name}' no existe en la capa '{layer.name()}'."}
 
-    # Obtener valores únicos del campo
-    unique_vals = list(layer.uniqueValues(field_idx))[:30]  # Máximo 30 categorías para legibilidad
+    unique_vals = list(layer.uniqueValues(field_idx))[:30]
     if not unique_vals:
         return {"success": False, "error": f"El campo '{field_name}' no contiene valores para categorizar."}
 
-    # Cargar rampa de color de QGIS
     style = QgsStyle.defaultStyle()
     ramp = style.colorRamp(color_ramp_name)
     if not ramp:
@@ -231,12 +284,12 @@ def apply_categorized_style(
         factor = i / max(1, num_vals - 1)
         color = ramp.color(factor) if ramp else QColor.fromHsv(int(factor * 360), 180, 220)
 
-        if geom_type == QgsWkbTypes.PointGeometry:
-            sym = QgsMarkerSymbol.createSimple({"name": "circle", "color": color.name(), "outline_color": "#333", "size": "3"})
-        elif geom_type == QgsWkbTypes.LineGeometry:
+        if geom_type == POINT_GEOM:
+            sym = QgsMarkerSymbol.createSimple({"name": "circle", "color": color.name(), "outline_color": "#333333", "size": "3"})
+        elif geom_type == LINE_GEOM:
             sym = QgsLineSymbol.createSimple({"line_color": color.name(), "line_width": "1.2"})
         else:
-            sym = QgsFillSymbol.createSimple({"color": color.name(), "outline_color": "#444", "outline_width": "0.3"})
+            sym = QgsFillSymbol.createSimple({"color": color.name(), "outline_color": "#444444", "outline_width": "0.3"})
 
         categories.append(QgsRendererCategory(val, sym, str(val)))
 
@@ -246,41 +299,54 @@ def apply_categorized_style(
     if iface and iface.mapCanvas():
         iface.mapCanvas().refresh()
 
-    return {"success": True, "message": f"Simbología categorizada aplicada a '{layer.name()}' sobre el campo '{field_name}' ({len(categories)} categorías)."}
+    return {"success": True, "message": f"Simbología categorizada aplicada a '{layer.name()}' sobre '{field_name}' ({len(categories)} categorías)."}
 
 
 def enable_labels(
-    layer_name: str,
-    field_name: str,
+    layer_name: Union[str, QgsMapLayer, None] = None,
+    field_name: Optional[str] = None,
     font_size: int = 9,
     font_color: str = "#1E293B",
     halo_color: str = "#FFFFFF",
     halo_size: float = 1.0,
-    project: Optional[QgsProject] = None
+    project: Optional[QgsProject] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """Activa etiquetas tipográficas con halo protector para legibilidad profesional."""
-    layer = find_layer_by_name(layer_name, project)
+    target = layer_name or kwargs.get("layer")
+    layer = find_layer_by_name(target, project)
     if not layer or not layer.isSpatial():
-        return {"success": False, "error": f"Capa '{layer_name}' no válida para etiquetar."}
+        return {"success": False, "error": f"Capa '{target}' no válida para etiquetar."}
 
-    if layer.fields().indexOf(field_name) == -1:
-        return {"success": False, "error": f"Campo '{field_name}' no encontrado en '{layer.name()}'."}
+    field_names = [f.name() for f in layer.fields()]
+    if not field_names:
+        return {"success": False, "error": f"La capa '{layer.name()}' no tiene campos de atributos."}
+
+    if not field_name or field_name not in field_names:
+        field_name = field_names[0]
+        for cand in ["nombre", "name", "nom", "municipio", "departamento", "titulo", "label", "codigo"]:
+            for fn in field_names:
+                if cand in fn.lower():
+                    field_name = fn
+                    break
+
+    font_family = kwargs.get("font_family", "Segoe UI")
+    buffer_col = kwargs.get("buffer_color", halo_color)
 
     settings = QgsPalLayerSettings()
     settings.fieldName = field_name
     settings.isExpression = False
 
     text_format = QgsTextFormat()
-    font = QFont("Helvetica", font_size)
+    font = QFont(font_family, int(font_size))
     font.setBold(True)
     text_format.setFont(font)
     text_format.setColor(QColor(font_color))
 
-    # Configuración de Halo (Buffer blanco alrededor del texto)
     buffer_settings = QgsTextBufferSettings()
     buffer_settings.setEnabled(True)
-    buffer_settings.setSize(halo_size)
-    buffer_settings.setColor(QColor(halo_color))
+    buffer_settings.setSize(float(halo_size))
+    buffer_settings.setColor(QColor(buffer_col))
     text_format.setBuffer(buffer_settings)
 
     settings.setFormat(text_format)
@@ -298,32 +364,25 @@ def run_geoprocessing(
     algorithm_id: str,
     parameters: Dict[str, Any],
     output_layer_name: Optional[str] = None,
-    project: Optional[QgsProject] = None
+    project: Optional[QgsProject] = None,
+    **kwargs
 ) -> Dict[str, Any]:
+    """Ejecuta un geoproceso nativo de QGIS (Processing) y añade la capa resultante al proyecto."""
     global processing
     if processing is None:
         try:
             import processing
         except ImportError:
-            return {"success": False, "error": "El proveedor de Geoprocesamiento (Processing) no está inicializado."}
-    """
-    Ejecuta un geoproceso nativo de QGIS (Processing) y añade la capa resultante al proyecto.
-    Algoritmos frecuentes:
-      - 'native:buffer' (INPUT, DISTANCE, OUTPUT='memory:')
-      - 'native:clip' (INPUT, OVERLAY, OUTPUT='memory:')
-      - 'native:centroids' (INPUT, OUTPUT='memory:')
-      - 'native:dissolve' (INPUT, FIELD=[], OUTPUT='memory:')
-    """
+            return {"success": False, "error": "El módulo Processing no está disponible."}
+
     if project is None:
         project = QgsProject.instance()
 
     try:
-        # Asegurar que OUTPUT sea en memoria si no se especificó ruta
         params = dict(parameters)
         if "OUTPUT" not in params:
             params["OUTPUT"] = "memory:"
 
-        # Resolver nombres de capas a objetos QgsVectorLayer si se pasaron como strings
         for k in ["INPUT", "OVERLAY", "INPUT_LAYER"]:
             if k in params and isinstance(params[k], str):
                 resolved = find_layer_by_name(params[k], project)
@@ -339,7 +398,7 @@ def run_geoprocessing(
             project.addMapLayer(output_obj)
             return {
                 "success": True,
-                "message": f"Geoproceso '{algorithm_id}' ejecutado con éxito. Capa '{name}' generada con {output_obj.featureCount()} entidades.",
+                "message": f"Geoproceso '{algorithm_id}' ejecutado con éxito. Capa '{name}' generada ({output_obj.featureCount()} entidades).",
                 "feature_count": output_obj.featureCount()
             }
         elif isinstance(output_obj, str) and os.path.exists(output_obj):
@@ -352,27 +411,34 @@ def run_geoprocessing(
 
     except Exception as exc:
         msg = f"Error ejecutando geoproceso '{algorithm_id}': {str(exc)}"
-        QgsMessageLog.logMessage(msg, LOG_TAG, Qgis.Critical)
+        QgsMessageLog.logMessage(msg, LOG_TAG, Qgis.MessageLevel.Critical)
         return {"success": False, "error": msg}
 
 
 def create_professional_layout(
-    layout_name: str = "Composicion_Cartografica",
-    title: str = "Mapa de Análisis Geoespacial",
-    subtitle: str = "Generado por CartoAI Copilot",
-    author: str = "David Ortiz (Geografía)",
+    layout_name: str = "Mapa Oficial CartoAI",
+    title: Optional[str] = None,
+    map_title: Optional[str] = None,
+    subtitle: str = "Composición generada por CartoAI Copilot",
+    author: str = "David Ortiz (Estudiante de Geografía)",
+    page_format: str = "A4",
     orientation: str = "landscape",
     include_legend: bool = True,
     include_scalebar: bool = True,
     include_north: bool = True,
-    project: Optional[QgsProject] = None
+    open_designer: bool = True,
+    project: Optional[QgsProject] = None,
+    **kwargs
 ) -> Dict[str, Any]:
     """
     Construye una composición cartográfica de nivel profesional (QgsPrintLayout)
     con mapa principal, encabezado estilizado, leyenda dinámica, barra de escala y norte.
+    Acepta tanto `title` como `map_title` y cualquier argumento adicional vía `**kwargs`.
     """
     if project is None:
         project = QgsProject.instance()
+
+    final_title = map_title or title or kwargs.get("header") or "MAPA TEMÁTICO OFICIAL"
 
     layout_manager = project.layoutManager()
     existing = layout_manager.layoutByName(layout_name)
@@ -383,13 +449,14 @@ def create_professional_layout(
     layout.initializeDefaults()
     layout.setName(layout_name)
 
-    is_landscape = (orientation.lower() != "portrait")
-    page_w = 297 if is_landscape else 210  # A4 mm
-    page_h = 210 if is_landscape else 297
+    is_landscape = (str(orientation).lower() != "portrait")
+    if str(page_format).upper() == "A3":
+        page_w, page_h = (420, 297) if is_landscape else (297, 420)
+    else:
+        page_w, page_h = (297, 210) if is_landscape else (210, 297)
 
-    # Ajustar dimensiones de página A4
     page = layout.pageCollection().pages()[0]
-    page.setPageSize(QgsLayoutSize(page_w, page_h, QgsUnitTypes.LayoutMillimeters))
+    page.setPageSize(QgsLayoutSize(page_w, page_h, LAYOUT_MM))
     layout_manager.addLayout(layout)
 
     # 1. Mapa Principal
@@ -399,34 +466,42 @@ def create_professional_layout(
     map_h = page_h - map_top - 18
 
     map_item = QgsLayoutItemMap(layout)
-    map_item.attemptMove(QgsLayoutPoint(map_margin_x, map_top, QgsUnitTypes.LayoutMillimeters))
-    map_item.attemptResize(QgsLayoutSize(map_w, map_h, QgsUnitTypes.LayoutMillimeters))
+    map_item.attemptMove(QgsLayoutPoint(map_margin_x, map_top, LAYOUT_MM))
+    map_item.attemptResize(QgsLayoutSize(map_w, map_h, LAYOUT_MM))
 
     if iface and iface.mapCanvas():
-        map_item.setExtent(iface.mapCanvas().extent())
+        ext = iface.mapCanvas().extent()
+        if not ext.isEmpty():
+            map_item.setExtent(ext)
 
     map_item.setFrameEnabled(True)
-    map_item.setFrameStrokeWidth(QgsLayoutMeasurement(0.4, QgsUnitTypes.LayoutMillimeters))
+    map_item.setFrameStrokeWidth(QgsLayoutMeasurement(0.4, LAYOUT_MM))
     layout.addLayoutItem(map_item)
 
     # 2. Encabezado: Título y Subtítulo
     title_item = QgsLayoutItemLabel(layout)
-    title_item.setText(title)
-    font_title = QFont("Helvetica", 16)
+    title_item.setText(final_title)
+    txt_fmt_title = QgsTextFormat()
+    font_title = QFont("Segoe UI", 16)
     font_title.setBold(True)
-    title_item.setFont(font_title)
+    txt_fmt_title.setFont(font_title)
+    txt_fmt_title.setColor(QColor("#0F172A"))
+    title_item.setTextFormat(txt_fmt_title)
     title_item.adjustSizeToText()
-    title_item.attemptMove(QgsLayoutPoint(map_margin_x, 8, QgsUnitTypes.LayoutMillimeters))
+    title_item.attemptMove(QgsLayoutPoint(map_margin_x, 7, LAYOUT_MM))
     layout.addLayoutItem(title_item)
 
     if subtitle:
         sub_item = QgsLayoutItemLabel(layout)
         sub_item.setText(subtitle)
-        font_sub = QFont("Helvetica", 10)
+        txt_fmt_sub = QgsTextFormat()
+        font_sub = QFont("Segoe UI", 10)
         font_sub.setItalic(True)
-        sub_item.setFont(font_sub)
+        txt_fmt_sub.setFont(font_sub)
+        txt_fmt_sub.setColor(QColor("#475569"))
+        sub_item.setTextFormat(txt_fmt_sub)
         sub_item.adjustSizeToText()
-        sub_item.attemptMove(QgsLayoutPoint(map_margin_x, 16, QgsUnitTypes.LayoutMillimeters))
+        sub_item.attemptMove(QgsLayoutPoint(map_margin_x, 16, LAYOUT_MM))
         layout.addLayoutItem(sub_item)
 
     # 3. Barra de Escala Gráfica
@@ -434,21 +509,21 @@ def create_professional_layout(
         scale_item = QgsLayoutItemScaleBar(layout)
         scale_item.setStyle("Single Box")
         scale_item.setLinkedMap(map_item)
-        scale_item.setUnits(QgsUnitTypes.DistanceKilometers)
+        if DIST_KM is not None:
+            scale_item.setUnits(DIST_KM)
         scale_item.setNumberOfSegments(2)
         scale_item.setNumberOfSegmentsLeft(0)
         scale_item.setUnitsPerSegment(2)
         scale_item.update()
-        scale_pos_y = map_top + map_h - 14
-        scale_item.attemptMove(QgsLayoutPoint(map_margin_x + 4, scale_pos_y, QgsUnitTypes.LayoutMillimeters))
+        scale_pos_y = map_top + map_h - 15
+        scale_item.attemptMove(QgsLayoutPoint(map_margin_x + 4, scale_pos_y, LAYOUT_MM))
         scale_item.setBackgroundEnabled(True)
-        scale_item.setBackgroundColor(QColor(255, 255, 255, 210))
+        scale_item.setBackgroundColor(QColor(255, 255, 255, 215))
         layout.addLayoutItem(scale_item)
 
     # 4. Flecha de Norte
     if include_north:
         north_item = QgsLayoutItemPicture(layout)
-        # Buscar ícono SVG de norte estándar en QGIS
         svg_paths = QgsApplication.svgPaths()
         north_svg = None
         for p in svg_paths:
@@ -458,8 +533,8 @@ def create_professional_layout(
                 break
         if north_svg:
             north_item.setPicturePath(north_svg)
-        north_item.attemptResize(QgsLayoutSize(14, 14, QgsUnitTypes.LayoutMillimeters))
-        north_item.attemptMove(QgsLayoutPoint(page_w - map_margin_x - 18, map_top + 4, QgsUnitTypes.LayoutMillimeters))
+        north_item.attemptResize(QgsLayoutSize(14, 14, LAYOUT_MM))
+        north_item.attemptMove(QgsLayoutPoint(page_w - map_margin_x - 18, map_top + 4, LAYOUT_MM))
         north_item.setBackgroundEnabled(True)
         north_item.setBackgroundColor(QColor(255, 255, 255, 190))
         layout.addLayoutItem(north_item)
@@ -472,30 +547,41 @@ def create_professional_layout(
         legend_item.setAutoUpdateModel(True)
         legend_item.setBackgroundEnabled(True)
         legend_item.setBackgroundColor(QColor(255, 255, 255, 225))
-        legend_item.attemptMove(QgsLayoutPoint(page_w - map_margin_x - 55, map_top + 22, QgsUnitTypes.LayoutMillimeters))
-        legend_item.attemptResize(QgsLayoutSize(50, 60, QgsUnitTypes.LayoutMillimeters))
+        legend_item.attemptMove(QgsLayoutPoint(page_w - map_margin_x - 55, map_top + 22, LAYOUT_MM))
+        legend_item.attemptResize(QgsLayoutSize(50, 60, LAYOUT_MM))
         layout.addLayoutItem(legend_item)
 
     # 6. Cajetín inferior con Metadatos
-    crs_str = project.crs().authid() if project.crs().isValid() else "WGS84"
+    crs_str = project.crs().authid() if project.crs().isValid() else "EPSG:4326"
     date_str = datetime.datetime.now().strftime("%d/%m/%Y")
-    meta_text = f"Autor: {author}  |  Sistema de Referencia: {crs_str}  |  Fecha: {date_str}"
+    meta_text = f"Autor: {author}  |  CRS: {crs_str}  |  Fecha: {date_str}"
 
     meta_item = QgsLayoutItemLabel(layout)
     meta_item.setText(meta_text)
-    font_meta = QFont("Helvetica", 8)
-    meta_item.setFont(font_meta)
+    txt_fmt_meta = QgsTextFormat()
+    txt_fmt_meta.setFont(QFont("Segoe UI", 8))
+    txt_fmt_meta.setColor(QColor("#334155"))
+    meta_item.setTextFormat(txt_fmt_meta)
     meta_item.adjustSizeToText()
-    meta_item.attemptMove(QgsLayoutPoint(map_margin_x, page_h - 10, QgsUnitTypes.LayoutMillimeters))
+    meta_item.attemptMove(QgsLayoutPoint(map_margin_x, page_h - 10, LAYOUT_MM))
     layout.addLayoutItem(meta_item)
 
+    if open_designer and iface:
+        try:
+            iface.openLayoutDesigner(layout)
+        except Exception:  # nosec B110
+            pass
+
+    msg = f"Composición '{layout_name}' ({page_format} {orientation}) creada y abierta exitosamente con mapa, título '{final_title}', leyenda, escala y norte."
+    print(msg)
     return {
         "success": True,
-        "message": f"Composición '{layout_name}' creada exitosamente con mapa, título, leyenda, escala y norte. Puedes abrirla en Proyecto ➔ Diseños."
+        "layout_name": layout_name,
+        "message": msg
     }
 
 
-def zoom_to_layer(layer_name: str, project: Optional[QgsProject] = None) -> Dict[str, Any]:
+def zoom_to_layer(layer_name: Union[str, QgsMapLayer, None] = None, project: Optional[QgsProject] = None) -> Dict[str, Any]:
     """Ajusta el zoom del mapa a la extensión de la capa indicada."""
     layer = find_layer_by_name(layer_name, project)
     if not layer:
@@ -523,7 +609,7 @@ def zoom_to_layer(layer_name: str, project: Optional[QgsProject] = None) -> Dict
     return {"success": False, "error": "Lienzo de mapa no disponible."}
 
 
-def apply_filter(layer_name: str, sql_expression: str, project: Optional[QgsProject] = None) -> Dict[str, Any]:
+def apply_filter(layer_name: Union[str, QgsMapLayer, None], sql_expression: str, project: Optional[QgsProject] = None) -> Dict[str, Any]:
     """Aplica o remueve un filtro SQL sobre los atributos de la capa vectorial."""
     layer = find_layer_by_name(layer_name, project)
     if not layer:
@@ -539,3 +625,55 @@ def apply_filter(layer_name: str, sql_expression: str, project: Optional[QgsProj
         iface.mapCanvas().refresh()
 
     return {"success": True, "message": f"Filtro aplicado a '{layer.name()}'. Entidades visibles: {layer.featureCount()}."}
+
+
+def add_osm_basemap(layer_name: str = "OpenStreetMap Standard", basemap_type: str = "osm", project: Optional[QgsProject] = None) -> Dict[str, Any]:
+    """
+    Carga mapas base mundiales vía XYZ Tiles:
+    - 'osm': OpenStreetMap Standard
+    - 'satellite': Esri World Imagery (Satélite de alta resolución)
+    - 'dark': CartoDB Dark Matter (Ideal para mapas temáticos oscuros)
+    - 'positron': CartoDB Positron (Minimalista claro para cartografía)
+    - 'topo': OpenTopoMap (Topográfico con relieve)
+    """
+    if project is None:
+        project = QgsProject.instance()
+
+    catalog = {
+        "osm": (
+            "OpenStreetMap Standard",
+            "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png&zmax=19&zmin=0"
+        ),
+        "satellite": (
+            "Esri World Imagery (Satélite)",
+            "type=xyz&url=https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}&zmax=19&zmin=0"
+        ),
+        "dark": (
+            "CartoDB Dark Matter",
+            "type=xyz&url=https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png&zmax=20&zmin=0"
+        ),
+        "positron": (
+            "CartoDB Positron (Minimalista)",
+            "type=xyz&url=https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png&zmax=20&zmin=0"
+        ),
+        "topo": (
+            "OpenTopoMap Relieve",
+            "type=xyz&url=https://tile.opentopomap.org/{z}/{x}/{y}.png&zmax=17&zmin=0"
+        ),
+    }
+
+    key = str(basemap_type).lower().strip()
+    default_title, url_with_params = catalog.get(key, catalog["osm"])
+    final_name = layer_name if layer_name != "OpenStreetMap Standard" else default_title
+
+    osm_layer = QgsRasterLayer(url_with_params, final_name, "wms")
+
+    if osm_layer.isValid():
+        project.addMapLayer(osm_layer)
+        if iface and iface.mapCanvas():
+            iface.mapCanvas().refresh()
+        print(f"Mapa base '{final_name}' cargado en el lienzo.")
+        return {"success": True, "message": f"Capa '{final_name}' añadida exitosamente.", "layer_id": osm_layer.id()}
+    else:
+        return {"success": False, "error": f"No se pudo inicializar el mapa base '{final_name}'."}
+

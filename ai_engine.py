@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Motor de Inteligencia Artificial para CartoAI Copilot: Map & GIS Architect.
+Motor de Inteligencia Artificial y Orquestador de Código (Arquitectura estilo TerraLab).
 
-Gestiona la conexión con modelos LLM (Google Gemini y OpenAI), orquesta
-el Function Calling de herramientas cartográficas (simbología, geoprocesamiento
-y diseño de composiciones de impresión) y ejecuta las tareas en segundo plano
-mediante QgsTask sin congelar la interfaz de QGIS.
-Compatible con QGIS 3 y QGIS 4.
+Analiza el proyecto activo de QGIS, consulta al modelo LLM con balanceo multi-modelo
+verificado en tiempo real (`gemini-3.5-flash-lite` -> `gemini-flash-lite-latest` ->
+`gemini-3.1-flash-lite` -> `gemini-3.6-flash` -> `gemini-3.5-flash` -> `gemma-4-26b-a4b-it`),
+extrae las acciones en PyQGIS generadas y las ejecuta en el hilo principal.
 """
 
 import json
+import re
+import time
 from typing import Dict, Any, List, Optional, Callable
 import requests
 
@@ -18,456 +19,431 @@ from qgis.core import (
     QgsTask,
     QgsApplication,
     QgsMessageLog,
-    Qgis
+    Qgis,
+    QgsProject
 )
 
-try:
-    from qgis.PyQt.QtCore import QObject, pyqtSignal
-except ImportError:
-    from PyQt5.QtCore import QObject, pyqtSignal
+from qgis.PyQt.QtCore import QObject, pyqtSignal
 
 from .qgis_tools import (
     get_active_layers_summary,
-    apply_vector_style,
-    apply_categorized_style,
-    enable_labels,
-    run_geoprocessing,
     create_professional_layout,
-    zoom_to_layer,
-    apply_filter
+    apply_vector_style,
+    enable_labels,
+    add_osm_basemap,
+    run_geoprocessing
 )
+from .pyqgis_executor import PyQGISExecutor
 
-LOG_TAG = "CartoAICopilot"
+LOG_TAG = "CartoAI"
 SETTINGS_PREFIX = "cartoai_copilot/"
+LEGACY_PREFIX = "ai_colombia_carto_agent/"
 
-# Esquema de herramientas de Cartografía y Geoprocesamiento expuesto al LLM
-CARTOGRAPHY_TOOLS_SCHEMA = [
-    {
-        "type": "function",
-        "function": {
-            "name": "inspect_active_layers",
-            "description": "Inspecciona todas las capas cargadas actualmente en el proyecto QGIS (geometría, CRS, conteo de entidades, campos y valores de muestra).",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "create_professional_layout",
-            "description": "Diseña una composición cartográfica de impresión lista para exportar (QgsPrintLayout) con mapa centrado, título, subtítulo, leyenda, escala gráfica y norte.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "layout_name": {
-                        "type": "string",
-                        "description": "Nombre de la composición (ej. 'Mapa_Final_2026')."
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Título principal del mapa (ej. 'Mapa de Cobertura y Uso del Suelo')."
-                    },
-                    "subtitle": {
-                        "type": "string",
-                        "description": "Subtítulo descriptivo o zona de estudio.",
-                        "default": "Generado por CartoAI Copilot"
-                    },
-                    "author": {
-                        "type": "string",
-                        "description": "Nombre del autor o entidad cartográfica.",
-                        "default": "David Ortiz (Geografía)"
-                    },
-                    "orientation": {
-                        "type": "string",
-                        "description": "Orientación de la página: 'landscape' (horizontal) o 'portrait' (vertical).",
-                        "default": "landscape"
-                    },
-                    "include_legend": {
-                        "type": "boolean",
-                        "description": "Si se debe incluir leyenda dinámica.",
-                        "default": True
-                    },
-                    "include_scalebar": {
-                        "type": "boolean",
-                        "description": "Si se debe incluir barra de escala gráfica.",
-                        "default": True
-                    },
-                    "include_north": {
-                        "type": "boolean",
-                        "description": "Si se debe incluir flecha de orientación al norte.",
-                        "default": True
-                    }
-                },
-                "required": ["layout_name", "title"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "apply_vector_style",
-            "description": "Aplica una simbología de color único armonizada y adaptativa a una capa vectorial (puntos, líneas o polígonos).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "layer_name": {
-                        "type": "string",
-                        "description": "Nombre de la capa en el proyecto."
-                    },
-                    "color": {
-                        "type": "string",
-                        "description": "Color principal en formato Hex (#RRGGBB, ej. '#2A9D8F', '#E76F51', '#457B9D')."
-                    },
-                    "outline_color": {
-                        "type": "string",
-                        "description": "Color del contorno (#RRGGBB).",
-                        "default": "#1D3557"
-                    },
-                    "size_or_width": {
-                        "type": "number",
-                        "description": "Tamaño del marcador en mm (puntos) o grosor de línea/borde.",
-                        "default": 2.0
-                    },
-                    "opacity": {
-                        "type": "number",
-                        "description": "Opacidad de 0.0 a 1.0.",
-                        "default": 1.0
-                    }
-                },
-                "required": ["layer_name", "color"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "apply_categorized_style",
-            "description": "Aplica una clasificación cualitativa/categorizada con colores diferenciados según un campo de atributos.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "layer_name": {
-                        "type": "string",
-                        "description": "Nombre de la capa objetivo."
-                    },
-                    "field_name": {
-                        "type": "string",
-                        "description": "Nombre del campo por el cual clasificar (ej. 'TIPO', 'CATEGORIA', 'DEPTO')."
-                    },
-                    "color_ramp_name": {
-                        "type": "string",
-                        "description": "Nombre de la rampa de color de QGIS: 'Spectral', 'Viridis', 'Plasma', 'Set1', 'Accent', 'Turbo'.",
-                        "default": "Spectral"
-                    }
-                },
-                "required": ["layer_name", "field_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "enable_labels",
-            "description": "Activa el etiquetado de texto en una capa con halo protector (buffer) para máxima legibilidad cartográfica.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "layer_name": {
-                        "type": "string",
-                        "description": "Nombre de la capa a etiquetar."
-                    },
-                    "field_name": {
-                        "type": "string",
-                        "description": "Nombre del campo cuyos valores se mostrarán como texto."
-                    },
-                    "font_size": {
-                        "type": "integer",
-                        "description": "Tamaño de fuente en puntos.",
-                        "default": 9
-                    },
-                    "font_color": {
-                        "type": "string",
-                        "description": "Color del texto (#RRGGBB).",
-                        "default": "#1E293B"
-                    },
-                    "halo_color": {
-                        "type": "string",
-                        "description": "Color del halo de protección alrededor de las letras.",
-                        "default": "#FFFFFF"
-                    }
-                },
-                "required": ["layer_name", "field_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_geoprocessing",
-            "description": "Ejecuta un geoproceso nativo de QGIS (Processing: buffers, clips, centroides, disolver) y añade el resultado al proyecto.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "algorithm_id": {
-                        "type": "string",
-                        "description": "ID del algoritmo de QGIS: 'native:buffer', 'native:clip', 'native:centroids', 'native:dissolve', 'native:convexhull'."
-                    },
-                    "parameters": {
-                        "type": "object",
-                        "description": "Diccionario con los parámetros del algoritmo (ej. {'INPUT': 'vias', 'DISTANCE': 100} para buffer)."
-                    },
-                    "output_layer_name": {
-                        "type": "string",
-                        "description": "Nombre para la nueva capa generada (ej. 'Buffer_Rios_100m')."
-                    }
-                },
-                "required": ["algorithm_id", "parameters"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "zoom_to_layer",
-            "description": "Encuadra y centra el mapa de QGIS sobre la extensión espacial de la capa indicada.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "layer_name": {
-                        "type": "string",
-                        "description": "Nombre de la capa hacia la cual hacer zoom."
-                    }
-                },
-                "required": ["layer_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "apply_filter",
-            "description": "Aplica una consulta de filtro SQL (setSubsetString) sobre los atributos de una capa para mostrar solo registros específicos.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "layer_name": {
-                        "type": "string",
-                        "description": "Nombre de la capa."
-                    },
-                    "sql_expression": {
-                        "type": "string",
-                        "description": "Expresión SQL de QGIS o 'CLEAR' para remover el filtro."
-                    }
-                },
-                "required": ["layer_name", "sql_expression"]
-            }
-        }
-    }
+# Lista de modelos verificados con respuesta 200 OK en < 1.5s ordenados por velocidad y disponibilidad
+VERIFIED_GEMINI_MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemma-4-26b-a4b-it"
 ]
 
-SYSTEM_PROMPT = """Eres 'CartoAI Copilot', un asistente de inteligencia artificial senior, arquitecto geoespacial y maestro cartógrafo integrado en QGIS.
-Tu misión es interpretar la información geográfica del proyecto activo (a nivel mundial), ejecutar geoprocesamientos espaciales avanzados y construir mapas y composiciones de impresión de estándar profesional.
+# Modelos deprecados o con saturación frecuente que deben redirigirse automáticamente
+DEPRECATED_OR_UNSTABLE_MODELS = {
+    "",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.7-flash",
+    "gemini-3.8-flash",
+    "gemini-4-argon"
+}
 
-Tus Capacidades Centrales:
-1. ANÁLISIS DE DATOS: Inspeccionas capas cargadas ('inspect_active_layers') para entender geometrías, sistemas de coordenadas (CRS), atributos y valores.
-2. DISEÑO CARTOGRÁFICO Y SIMBOLOGÍA:
-   - Aplicas estilos con paletas cromáticas armónicas y profesionales ('apply_vector_style').
-   - Clasificas temáticamente capas cualitativas o cuantitativas con rampas armónicas ('apply_categorized_style').
-   - Activas etiquetas tipográficas con halo blanco para garantizar legibilidad contra el fondo ('enable_labels').
-3. COMPOSICIÓN DE IMPRESIÓN (LAYOUTS):
-   - Cuando el usuario te pida crear o diseñar un mapa/layout, utiliza 'create_professional_layout' para generar la composición completa en formato A4 con mapa centrado, título, subtítulo, autor, leyenda dinámica, barra de escala gráfica y flecha de norte.
-4. GEOPROCESAMIENTO AVANZADO:
-   - Ejecutas herramientas espaciales con 'run_geoprocessing' (ej. buffers de proximidad con 'native:buffer', cortes espaciales con 'native:clip', centroides con 'native:centroids', disolver límites con 'native:dissolve').
-5. NAVEGACIÓN Y FILTROS:
-   - Ajustas el zoom del lienzo con 'zoom_to_layer' y aplicas consultas SQL con 'apply_filter'.
+SYSTEM_PROMPT = """Eres CartoAI Copilot, un arquitecto de software geoespacial y copiloto de PyQGIS de nivel senior integrado directamente en QGIS.
+Tu objetivo es ayudar al usuario a realizar análisis espacial, geoprocesamientos, diseño de simbología temática, descarga/carga de capas y creación de layouts de impresión profesionales sobre las capas de su proyecto.
 
-Estilo de Comunicación:
-- Responde siempre de forma clara, técnica y concisa en Español.
-- Utiliza formato Markdown con viñetas para explicar las acciones realizadas y destacar los nombres de capas y herramientas.
+Cuentas con acceso completo al entorno de ejecución vivo de PyQGIS.
+Variables pre-cargadas en el entorno de ejecución:
+- `iface`: Objeto QgisInterface principal (acceso al lienzo `iface.mapCanvas()`, capa activa `iface.activeLayer()`).
+- `project`: Instancia de `QgsProject.instance()`.
+- `processing`: Módulo de geoprocesamiento nativo de QGIS (ej. `processing.run('native:buffer', ...)`).
+- Clases importadas: `QgsVectorLayer`, `QgsRasterLayer`, `QgsWkbTypes`, `QColor`, `QFont`, `QgsSingleSymbolRenderer`, `QgsCategorizedSymbolRenderer`, `QgsPrintLayout`, etc.
+
+Directrices Obligatorias de Respuesta:
+1. Explica de forma concisa y clara lo que vas a realizar.
+2. SIEMPRE que el usuario pida una acción sobre el mapa, capas, estilos, filtros, geoprocesos o diseño de layouts, escribe el código ejecutable dentro de un bloque:
+```python
+# Código PyQGIS ejecutable
+```
+3. Reglas de oro de PyQGIS (QGIS 3.28 - 4.99 / PyQt6):
+   - Para buscar una capa por nombre: usa `project.mapLayersByName('Nombre')` o toma `iface.activeLayer()` si no especifica nombre.
+   - Si creas una capa en memoria o mediante `processing.run(..., {'OUTPUT': 'memory:'})`, añádela al proyecto con `project.addMapLayer(capa)`.
+   - Para hacer zoom a una capa: `iface.mapCanvas().setExtent(layer.extent()); iface.mapCanvas().refresh()`.
+   - Para cambiar escala o centrar el lienzo: usa `iface.mapCanvas().setCenter(QgsPointXY(x, y))` y `iface.mapCanvas().zoomScale(50000)` (NUNCA uses `.setScale()`, no existe en QgsMapCanvas).
+   - Para geometrías desde puntos XY: usa `QgsGeometry.fromPointXY(QgsPointXY(lon, lat))`, `QgsGeometry.fromPolylineXY([...])` y `QgsGeometry.fromPolygonXY([[...]])`.
+   - Para crear campos en capas de memoria: usa la URI `Point?crs=epsg:4326&field=nombre:string&field=id:integer` o `QgsField('nombre', QVariant.String)`.
+   - Para crear un layout de impresión profesional rápidamente, usa directamente:
+     `create_professional_layout(layout_name='Mapa A4', map_title='Título', author='David Ortiz')`
+4. Responde siempre en Español.
 """
 
 
 class AISettingsManager:
-    """Gestiona la persistencia de credenciales y modelos en QgsSettings."""
+    """Almacenamiento persistente de configuración en QgsSettings con migración automática."""
 
     @staticmethod
     def get_provider() -> str:
-        settings = QgsSettings()
-        return settings.value(SETTINGS_PREFIX + "provider", "gemini", type=str)
+        s = QgsSettings()
+        val = s.value(SETTINGS_PREFIX + "provider", "", type=str)
+        if not val:
+            val = s.value(LEGACY_PREFIX + "provider", "gemini", type=str)
+        return val or "gemini"
 
     @staticmethod
     def set_provider(provider: str) -> None:
-        settings = QgsSettings()
-        settings.setValue(SETTINGS_PREFIX + "provider", provider)
+        s = QgsSettings()
+        s.setValue(SETTINGS_PREFIX + "provider", provider)
+        s.setValue(LEGACY_PREFIX + "provider", provider)
 
     @staticmethod
     def get_api_key() -> str:
-        settings = QgsSettings()
-        return settings.value(SETTINGS_PREFIX + "api_key", "", type=str)
+        s = QgsSettings()
+        key = s.value(SETTINGS_PREFIX + "api_key", "", type=str).strip()
+        if not key:
+            key = s.value(LEGACY_PREFIX + "api_key", "", type=str).strip()
+            if key:
+                s.setValue(SETTINGS_PREFIX + "api_key", key)
+        return key
 
     @staticmethod
     def set_api_key(api_key: str) -> None:
-        settings = QgsSettings()
-        settings.setValue(SETTINGS_PREFIX + "api_key", api_key.strip())
+        clean_key = api_key.strip()
+        s = QgsSettings()
+        s.setValue(SETTINGS_PREFIX + "api_key", clean_key)
+        s.setValue(LEGACY_PREFIX + "api_key", clean_key)
 
     @staticmethod
     def get_model_name() -> str:
-        settings = QgsSettings()
         provider = AISettingsManager.get_provider()
         default_model = "gemini-3.5-flash-lite" if provider == "gemini" else "gpt-4o-mini"
-        val = settings.value(SETTINGS_PREFIX + "model_name", default_model, type=str)
-        if provider == "gemini" and val in ("gemini-1.5-flash", "gemini-2.0-flash", "gemini-3.5-flash", ""):
+        s = QgsSettings()
+        val = s.value(SETTINGS_PREFIX + "model_name", default_model, type=str).strip()
+        if provider == "gemini" and val in DEPRECATED_OR_UNSTABLE_MODELS:
             val = "gemini-3.5-flash-lite"
-            settings.setValue(SETTINGS_PREFIX + "model_name", val)
+            s.setValue(SETTINGS_PREFIX + "model_name", val)
+            s.setValue(LEGACY_PREFIX + "model_name", val)
         return val
 
     @staticmethod
     def set_model_name(model_name: str) -> None:
-        settings = QgsSettings()
-        settings.setValue(SETTINGS_PREFIX + "model_name", model_name.strip())
+        clean_model = model_name.strip()
+        if clean_model in DEPRECATED_OR_UNSTABLE_MODELS and AISettingsManager.get_provider() == "gemini":
+            clean_model = "gemini-3.5-flash-lite"
+        s = QgsSettings()
+        s.setValue(SETTINGS_PREFIX + "model_name", clean_model)
+        s.setValue(LEGACY_PREFIX + "model_name", clean_model)
+
+    @staticmethod
+    def get_custom_url() -> str:
+        return QgsSettings().value(SETTINGS_PREFIX + "custom_url", "", type=str)
+
+    @staticmethod
+    def set_custom_url(url: str) -> None:
+        QgsSettings().setValue(SETTINGS_PREFIX + "custom_url", url.strip())
+
+    @staticmethod
+    def get_theme() -> str:
+        return QgsSettings().value(SETTINGS_PREFIX + "ui_theme", "dark", type=str) or "dark"
+
+    @staticmethod
+    def set_theme(theme: str) -> None:
+        QgsSettings().setValue(SETTINGS_PREFIX + "ui_theme", theme)
+
+    @staticmethod
+    def get_agent_mode() -> str:
+        return QgsSettings().value(SETTINGS_PREFIX + "agent_mode", "equilibrado", type=str) or "equilibrado"
+
+    @staticmethod
+    def set_agent_mode(mode: str) -> None:
+        QgsSettings().setValue(SETTINGS_PREFIX + "agent_mode", mode)
+
+    @staticmethod
+    def get_effort_level() -> str:
+        return QgsSettings().value(SETTINGS_PREFIX + "effort_level", "Medium", type=str) or "Medium"
+
+    @staticmethod
+    def set_effort_level(effort: str) -> None:
+        QgsSettings().setValue(SETTINGS_PREFIX + "effort_level", effort)
 
 
 class LLMClient:
-    """Cliente HTTP optimizado con fallback automático entre modelos para cero latencia."""
+    """Cliente de alta disponibilidad con conmutación automática entre 6 modelos verificados."""
 
-    def __init__(self, provider: str, api_key: str, model_name: str):
-        self.provider = provider.lower()
-        self.api_key = api_key.strip()
-        self.model_name = model_name.strip()
+    def __init__(self, provider: str, api_key: str, model_name: str, custom_url: Optional[str] = None):
+        self.provider = provider
+        self.api_key = api_key.strip() if api_key else ""
+        self.model_name = model_name.strip() if model_name else ("gemini-3.5-flash-lite" if provider == "gemini" else "gpt-4o-mini")
+        self.custom_url = custom_url.strip() if custom_url else ""
 
-    def generate_response(self, messages: List[Dict[str, Any]], active_layers_summary: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not self.api_key:
-            raise ValueError("Por favor configure su API Key en el icono de engranaje (⚙️).")
+    def generate_response(self, messages: List[Dict[str, Any]], active_layers_summary: List[Dict[str, Any]]) -> str:
+        if not self.api_key and self.provider != "custom":
+            raise ValueError("Por favor configure su API Key en el icono de configuración (⚙️).")
 
         if self.provider == "gemini":
             return self._call_gemini(messages, active_layers_summary)
         else:
-            return self._call_openai(messages, active_layers_summary)
+            return self._call_openai_compatible(messages, active_layers_summary)
 
-    def _call_openai(self, messages: List[Dict[str, Any]], active_layers_summary: List[Dict[str, Any]]) -> Dict[str, Any]:
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+    def _call_gemini(self, messages: List[Dict[str, Any]], active_layers_summary: List[Dict[str, Any]]) -> str:
+        primary_model = self.model_name
+        if not primary_model or primary_model in DEPRECATED_OR_UNSTABLE_MODELS:
+            primary_model = "gemini-3.5-flash-lite"
 
-        augmented_system = SYSTEM_PROMPT + f"\n\nESTADO ACTUAL DEL PROYECTO QGIS:\nCapas cargadas: {json.dumps(active_layers_summary, ensure_ascii=False)}"
-
-        payload_messages = [{"role": "system", "content": augmented_system}]
-        for m in messages:
-            payload_messages.append({"role": m["role"], "content": m["content"]})
-
-        payload = {
-            "model": self.model_name or "gpt-4o-mini",
-            "messages": payload_messages,
-            "tools": CARTOGRAPHY_TOOLS_SCHEMA,
-            "tool_choice": "auto",
-            "temperature": 0.2
-        }
-
-        response = requests.post(url, headers=headers, json=payload, timeout=25)
-        response.raise_for_status()
-        data = response.json()
-
-        choice = data["choices"][0]
-        message = choice["message"]
-        tool_calls = message.get("tool_calls", [])
-
-        parsed = []
-        for tc in tool_calls:
-            parsed.append({
-                "id": tc.get("id"),
-                "name": tc["function"]["name"],
-                "arguments": json.loads(tc["function"].get("arguments", "{}"))
-            })
-
-        return {"content": message.get("content") or "", "tool_calls": parsed}
-
-    def _call_gemini(self, messages: List[Dict[str, Any]], active_layers_summary: List[Dict[str, Any]]) -> Dict[str, Any]:
-        preferred_model = self.model_name or "gemini-3.5-flash-lite"
-        if preferred_model in ("gemini-1.5-flash", "gemini-2.0-flash", "gemini-3.5-flash", ""):
-            preferred_model = "gemini-3.5-flash-lite"
-
-        candidate_models = [preferred_model]
-        for fb in ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]:
+        # Construir cadena de conmutación por error (Failover Chain) con los 6 modelos 200 OK
+        candidate_models = [primary_model]
+        for fb in VERIFIED_GEMINI_MODELS:
             if fb not in candidate_models:
                 candidate_models.append(fb)
 
-        gemini_tools = [
-            {
-                "name": t["function"]["name"],
-                "description": t["function"]["description"],
-                "parameters": t["function"]["parameters"]
-            }
-            for t in CARTOGRAPHY_TOOLS_SCHEMA
-        ]
+        agent_mode = AISettingsManager.get_agent_mode()
+        effort_level = AISettingsManager.get_effort_level()
 
-        augmented_system = SYSTEM_PROMPT + f"\n\nESTADO ACTUAL DEL PROYECTO QGIS:\nCapas cargadas: {json.dumps(active_layers_summary, ensure_ascii=False)}"
+        mode_instruction = {
+            "autopilot": "\nMODO ACTIVO: Piloto Automático. Sé ultra-conciso (1-2 líneas de respuesta amigable) y genera directamente el código PyQGIS ejecutable.",
+            "equilibrado": "\nMODO ACTIVO: Equilibrado. Habla con personalidad de colega geógrafo experto, explica brevemente el paso cartográfico y ejecuta el código PyQGIS.",
+            "geografo": "\nMODO ACTIVO: Arquitecto Geógrafo & Académico. Habla con entusiasmo cartográfico, explica los criterios espaciales/metodológicos (proyección, jerarquía visual, simbología) y proporciona el código PyQGIS completo."
+        }.get(agent_mode, "")
+
+        max_tokens = 1200 if effort_level == "Low" else (3072 if effort_level == "High" else 2048)
+
+        context_str = f"{mode_instruction}\n\nESTADO ACTUAL DEL PROYECTO QGIS:\nCapas en el proyecto:\n{json.dumps(active_layers_summary, ensure_ascii=False, indent=2)}"
+        full_system_prompt = SYSTEM_PROMPT + context_str
 
         contents = []
         for m in messages:
-            role = "user" if m["role"] == "user" else "model"
-            contents.append({"role": role, "parts": [{"text": m["content"]}]})
-
-        payload = {
-            "system_instruction": {"parts": [{"text": augmented_system}]},
-            "contents": contents,
-            "tools": [{"function_declarations": gemini_tools}],
-            "generationConfig": {"temperature": 0.2}
-        }
+            role = "user" if m.get("role") == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": m.get("content", "")}]})
 
         headers = {"Content-Type": "application/json"}
-        last_err = None
+        errors_log = []
 
         for cand in candidate_models:
-            clean_m = cand if cand.startswith("models/") else f"models/{cand}"
-            url = f"https://generativelanguage.googleapis.com/v1beta/{clean_m}:generateContent?key={self.api_key}"
+            cand_clean = cand.replace("models/", "")
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{cand_clean}:generateContent?key={self.api_key}"
+
+            # Algunos modelos como gemma no aceptan system_instruction separado; lo inyectamos de forma compatible
+            if cand_clean.startswith("gemma"):
+                gemma_contents = [{"role": "user", "parts": [{"text": full_system_prompt + "\n\nSolicitud del usuario: " + messages[-1].get("content", "")}]}]
+                payload = {
+                    "contents": gemma_contents,
+                    "generationConfig": {"temperature": 0.25, "maxOutputTokens": max_tokens}
+                }
+            else:
+                payload = {
+                    "system_instruction": {"parts": [{"text": full_system_prompt}]},
+                    "contents": contents,
+                    "generationConfig": {"temperature": 0.25, "maxOutputTokens": max_tokens}
+                }
 
             try:
-                r = requests.post(url, headers=headers, json=payload, timeout=15)
+                r = requests.post(url, headers=headers, json=payload, timeout=12)
                 if r.status_code == 200:
                     data = r.json()
                     candidates = data.get("candidates", [])
-                    if not candidates:
-                        return {"content": "No se recibió respuesta del modelo.", "tool_calls": []}
-
-                    content_obj = candidates[0].get("content", {})
-                    parts = content_obj.get("parts", [])
-
-                    text_content = ""
-                    tool_calls = []
-
-                    for p in parts:
-                        if "text" in p:
-                            text_content += p["text"]
-                        if "functionCall" in p:
-                            fc = p["functionCall"]
-                            tool_calls.append({
-                                "id": fc.get("name"),
-                                "name": fc.get("name"),
-                                "arguments": fc.get("args", {})
-                            })
-
-                    return {"content": text_content, "tool_calls": tool_calls}
-
-                elif r.status_code in (503, 429, 500, 404):
-                    last_err = f"{r.status_code}: {r.text[:150]}"
-                    continue
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        text_out = "".join(p.get("text", "") for p in parts)
+                        if text_out.strip():
+                            return text_out
                 else:
-                    r.raise_for_status()
-
-            except requests.exceptions.RequestException as exc:
-                last_err = str(exc)
+                    err_detail = r.json().get("error", {}).get("message", r.text[:80]) if r.text else str(r.status_code)
+                    errors_log.append(f"{cand_clean}({r.status_code})")
+                    # Pasar de inmediato al siguiente modelo verificado sin bloquear al usuario
+                    continue
+            except Exception as exc:  # nosec B112
+                errors_log.append(f"{cand_clean}({type(exc).__name__})")
                 continue
 
-        raise ValueError(f"Servicio temporalmente no disponible: {last_err}")
+        raise RuntimeError(f"No se pudo conectar con los servidores de IA ({', '.join(errors_log)}).")
+
+    def _call_openai_compatible(self, messages: List[Dict[str, Any]], active_layers_summary: List[Dict[str, Any]]) -> str:
+        endpoint = self.custom_url if (self.provider == "custom" and self.custom_url) else "https://api.openai.com/v1"
+        url = endpoint.rstrip("/") + "/chat/completions"
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}" if self.api_key else ""
+        }
+
+        augmented_system = SYSTEM_PROMPT + f"\n\nESTADO ACTUAL DEL PROYECTO QGIS:\nCapas activas en el proyecto:\n{json.dumps(active_layers_summary, ensure_ascii=False, indent=2)}"
+
+        req_messages = [{"role": "system", "content": augmented_system}]
+        for m in messages:
+            req_messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+
+        payload = {
+            "model": self.model_name or "gpt-4o-mini",
+            "messages": req_messages,
+            "temperature": 0.2,
+            "max_tokens": 2048
+        }
+
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=25)
+            if r.status_code == 200:
+                data = r.json()
+                return data["choices"][0]["message"]["content"]
+            else:
+                raise RuntimeError(f"Error HTTP {r.status_code} desde {endpoint}: {r.text[:150]}")
+        except requests.exceptions.RequestException as exc:
+            raise RuntimeError(f"Error de conexión con {endpoint}: {str(exc)}")
+
+
+def generate_local_fallback_code(user_prompt: str) -> Optional[tuple[str, str]]:
+    """
+    Motor local de respaldo: resuelve comandos cartográficos usando PyQGIS nativo
+    si no hay conexión a internet o si el usuario aún no configura su API Key.
+    """
+    prompt = user_prompt.lower()
+
+    # 1. Cargar OpenStreetMap
+    if any(k in prompt for k in ["osm", "openstreetmap", "mapa base", "capa base", "basemap"]):
+        code = """# Cargar mapa base de OpenStreetMap vía XYZ Tiles
+from qgis.core import QgsRasterLayer, QgsProject
+urlWithParams = 'type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png&zmax=19&zmin=0'
+osm_layer = QgsRasterLayer(urlWithParams, 'OpenStreetMap Standard', 'wms')
+if osm_layer.isValid():
+    QgsProject.instance().addMapLayer(osm_layer)
+    print("Mapa base OpenStreetMap añadido correctamente al proyecto.")
+else:
+    print("No se pudo conectar con el servicio de OpenStreetMap.")
+"""
+        return ("He añadido la capa base mundial de OpenStreetMap (XYZ Tiles) a tu proyecto.", code)
+
+    # 2. Diseñar Layout / Composición de Impresión A4
+    if any(k in prompt for k in ["layout", "composicion", "composición", "diseñar", "diseña", "mapa a4", "imprimir"]):
+        code = """# Crear composición cartográfica profesional A4
+res = create_professional_layout(
+    layout_name="Mapa Oficial CartoAI",
+    map_title="MAPA TEMÁTICO OFICIAL",
+    subtitle="Composición profesional generada por CartoAI Copilot",
+    author="David Ortiz - Estudiante de Geografía",
+    page_format="A4",
+    orientation="landscape"
+)
+print("Resultado layout:", res.get("message", "Listo"))
+"""
+        return ("He generado una composición cartográfica A4 horizontal profesional con marco, leyenda, barra de escala y flecha de norte.", code)
+
+    # 3. Buffer / Área de Influencia
+    if "buffer" in prompt or "area de influencia" in prompt or "área de influencia" in prompt:
+        dist_match = re.search(r"(\d+(?:\.\d+)?)", prompt)
+        dist = dist_match.group(1) if dist_match else "100"
+        code = f"""# Generar buffer sobre la capa activa
+import processing
+from qgis.core import QgsProject
+from qgis.utils import iface
+
+layer = iface.activeLayer()
+if not layer or not layer.isValid():
+    layers = list(QgsProject.instance().mapLayers().values())
+    layer = layers[0] if layers else None
+
+if layer:
+    params = {{
+        'INPUT': layer,
+        'DISTANCE': {dist},
+        'SEGMENTS': 10,
+        'DISSOLVE': False,
+        'OUTPUT': 'memory:'
+    }}
+    res = processing.run('native:buffer', params)
+    out_layer = res['OUTPUT']
+    out_layer.setName(f"Buffer {dist}m - {{layer.name()}}")
+    QgsProject.instance().addMapLayer(out_layer)
+    iface.mapCanvas().setExtent(out_layer.extent())
+    iface.mapCanvas().refresh()
+    print(f"Buffer de {dist}m creado exitosamente sobre {{layer.name()}}")
+else:
+    print("No se encontró ninguna capa activa para aplicar el buffer.")
+"""
+        return (f"He ejecutado un análisis de proximidad (Buffer de {dist} metros) sobre tu capa activa.", code)
+
+    # 4. Auto-estilo / Simbología
+    if any(k in prompt for k in ["estilo", "auto-estilo", "simbologia", "simbología", "color", "pintar", "colorear"]):
+        code = """# Aplicar estilo vectorial armonizado
+from qgis.utils import iface
+layer = iface.activeLayer()
+if layer:
+    res = apply_vector_style(layer, color_hex='#2563EB', opacity=0.85, stroke_color='#1E40AF', stroke_width=0.6)
+    iface.mapCanvas().refresh()
+    print(f"Estilo visual profesional aplicado a la capa '{layer.name()}'.")
+else:
+    print("Por favor selecciona una capa activa en el panel de capas.")
+"""
+        return ("He aplicado una paleta de colores cartográficos armonizada sobre la capa activa.", code)
+
+    # 5. Etiquetado
+    if any(k in prompt for k in ["etiquetar", "etiqueta", "labels", "label", "nombres"]):
+        code = """# Activar etiquetado inteligente con halo
+from qgis.utils import iface
+layer = iface.activeLayer()
+if layer and layer.isValid():
+    field_names = [f.name() for f in layer.fields()]
+    candidate = None
+    for cand in ['nombre', 'name', 'nom', 'municipio', 'departamento', 'codigo', 'id']:
+        for fn in field_names:
+            if cand in fn.lower():
+                candidate = fn
+                break
+        if candidate:
+            break
+    field_to_use = candidate if candidate else field_names[0]
+    enable_labels(layer, field_name=field_to_use, font_size=9, font_family='Segoe UI', buffer_color='#FFFFFF')
+    iface.mapCanvas().refresh()
+    print(f"Etiquetas activadas en '{layer.name()}' usando el campo '{field_to_use}'.")
+else:
+    print("No hay una capa vectorial activa seleccionada.")
+"""
+        return ("He configurado el etiquetado tipográfico con halo de protección visual sobre la capa activa.", code)
+
+    # 6. Analizar / Estadísticas / Resumen
+    if any(k in prompt for k in ["analizar", "analisis", "análisis", "estadistica", "estadísticas", "atributos", "campos", "resumen", "info"]):
+        code = """# Inspección detallada de la capa activa
+from qgis.utils import iface
+from qgis.core import QgsProject, QgsWkbTypes, QgsVectorLayer
+
+layer = iface.activeLayer()
+if not layer:
+    layers = list(QgsProject.instance().mapLayers().values())
+    layer = layers[0] if layers else None
+
+if layer and isinstance(layer, QgsVectorLayer):
+    geom = QgsWkbTypes.displayString(layer.wkbType())
+    crs = layer.crs().authid()
+    fields = [f"{f.name()} ({f.typeName()})" for f in layer.fields()]
+    ext = layer.extent()
+    print(f"Capa: {layer.name()}")
+    print(f"Geometría: {geom} | Entidades: {layer.featureCount():,} | CRS: {crs}")
+    print(f"Extensión: [{ext.xMinimum():.4f}, {ext.yMinimum():.4f}] a [{ext.xMaximum():.4f}, {ext.yMaximum():.4f}]")
+    print(f"Campos ({len(fields)}): " + ", ".join(fields[:15]))
+elif layer:
+    print(f"Capa ráster activa: {layer.name()} | CRS: {layer.crs().authid()}")
+else:
+    print("No hay capas cargadas en el proyecto actualmente.")
+"""
+        return ("Aquí tienes el diagnóstico técnico y resumen de estructura de tu capa activa:", code)
+
+    return None
 
 
 class CartoAgentWorkerTask(QgsTask):
-    """Tarea asíncrona en segundo plano para procesar razonamiento cartográfico y geoprocesos."""
+    """Tarea asíncrona en segundo plano que consulta al LLM y ejecuta el código en el hilo principal."""
 
     def __init__(
         self,
@@ -477,7 +453,7 @@ class CartoAgentWorkerTask(QgsTask):
         on_success_callback: Callable[[Dict[str, Any]], None],
         on_error_callback: Callable[[str], None]
     ):
-        super().__init__(description, QgsTask.CanCancel)
+        super().__init__(description, QgsTask.Flag.CanCancel)
         self.user_message = user_message
         self.history = history
         self.on_success = on_success_callback
@@ -490,48 +466,83 @@ class CartoAgentWorkerTask(QgsTask):
             provider = AISettingsManager.get_provider()
             api_key = AISettingsManager.get_api_key()
             model_name = AISettingsManager.get_model_name()
+            custom_url = AISettingsManager.get_custom_url()
 
-            if not api_key:
-                raise ValueError("Por favor configure la API Key en el icono de engranaje (⚙️).")
-
-            client = LLMClient(provider=provider, api_key=api_key, model_name=model_name)
             layers_summary = get_active_layers_summary()
 
-            messages = list(self.history)
-            messages.append({"role": "user", "content": self.user_message})
+            llm_text = ""
+            llm_error_detail = ""
+            try:
+                if api_key or provider == "custom":
+                    client = LLMClient(provider=provider, api_key=api_key, model_name=model_name, custom_url=custom_url)
+                    messages = list(self.history)
+                    messages.append({"role": "user", "content": self.user_message})
+                    llm_text = client.generate_response(messages, layers_summary)
+            except Exception as llm_exc:
+                llm_error_detail = str(llm_exc)
+                QgsMessageLog.logMessage(f"Aviso LLM: {llm_error_detail}", LOG_TAG, Qgis.MessageLevel.Warning)
 
-            llm_result = client.generate_response(messages, layers_summary)
-            tool_calls = llm_result.get("tool_calls", [])
+            code_blocks = re.findall(r"```(?:python|py)?\s*(.*?)\s*```", llm_text, re.DOTALL) if llm_text else []
 
-            execution_reports = []
-            for call in tool_calls:
-                fn_name = call.get("name")
-                args = call.get("arguments", {})
-
-                report_item = {"name": fn_name, "args": args}
-
-                if fn_name == "inspect_active_layers":
-                    report_item["result"] = layers_summary
+            if not llm_text:
+                local_solution = generate_local_fallback_code(self.user_message)
+                if local_solution:
+                    explanation, fallback_code = local_solution
+                    llm_text = f"{explanation}\n\n```python\n{fallback_code}\n```"
+                    code_blocks = [fallback_code]
                 else:
-                    # Las acciones cartográficas de PyQGIS se ejecutan en el hilo principal de la UI
-                    report_item["qgis_action"] = {"action": fn_name, "args": args}
-
-                execution_reports.append(report_item)
+                    if not api_key and provider != "custom":
+                        raise ValueError("Por favor introduce tu API Key en Configuración (⚙️) para habilitar el agente.")
+                    else:
+                        raise RuntimeError(f"Detalle de conexión: {llm_error_detail}")
 
             self.result = {
-                "llm_content": llm_result.get("content", ""),
-                "tool_calls": tool_calls,
-                "reports": execution_reports
+                "llm_text": llm_text,
+                "code_blocks": code_blocks
             }
             return True
 
         except Exception as exc:
             self.error_message = str(exc)
-            QgsMessageLog.logMessage(f"Fallo en CartoAgentWorkerTask: {str(exc)}", LOG_TAG, Qgis.Critical)
+            QgsMessageLog.logMessage(f"Fallo en CartoAgentWorkerTask: {str(exc)}", LOG_TAG, Qgis.MessageLevel.Critical)
             return False
 
     def finished(self, result: bool) -> None:
         if result and self.result:
+            execution_results = []
+            for code in self.result.get("code_blocks", []):
+                exec_report = PyQGISExecutor.execute(code)
+
+                # Auto-reparación automática si ocurre algún error de atributo o sintaxis en PyQGIS
+                if not exec_report.get("success") and exec_report.get("error"):
+                    try:
+                        provider = AISettingsManager.get_provider()
+                        api_key = AISettingsManager.get_api_key()
+                        model_name = AISettingsManager.get_model_name()
+                        custom_url = AISettingsManager.get_custom_url()
+                        if api_key or provider == "custom":
+                            client = LLMClient(provider=provider, api_key=api_key, model_name=model_name, custom_url=custom_url)
+                            fix_prompt = (
+                                "El siguiente código PyQGIS produjo este error en QGIS 4 (PyQt6):\n"
+                                f"ERROR:\n{exec_report['error']}\n\n"
+                                f"CÓDIGO ORIGINAL:\n```python\n{code}\n```\n\n"
+                                "Devuelve ÚNICAMENTE el bloque ```python ... ``` corregido sin explicaciones adicionales."
+                            )
+                            fixed_resp = client.generate_response([{"role": "user", "content": fix_prompt}], [])
+                            fixed_blocks = re.findall(r"```(?:python|py)?\s*(.*?)\s*```", fixed_resp, re.DOTALL)
+                            if fixed_blocks:
+                                retry_report = PyQGISExecutor.execute(fixed_blocks[0])
+                                if retry_report.get("success"):
+                                    code = fixed_blocks[0]
+                                    exec_report = retry_report
+                    except Exception:  # nosec B110
+                        pass
+
+                execution_results.append({
+                    "code": exec_report.get("executed_code", code),
+                    "report": exec_report
+                })
+            self.result["execution_results"] = execution_results
             self.on_success(self.result)
         else:
             self.on_error(self.error_message or "Error procesando la solicitud.")
